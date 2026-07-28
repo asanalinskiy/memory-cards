@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Memory Cards — Онлайн игра</title>
+
+  <!-- PWA Meta tags & Manifest link -->
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#090d16">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Memory Cards">
+
+  <!-- External Libraries -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800;900&display=swap');
+    body { font-family: 'Plus Jakarta Sans', sans-serif; user-select: none; touch-action: manipulation; }
+    .perspective-1000 { perspective: 1000px; }
+    .transform-style-3d { transform-style: preserve-3d; }
+    .backface-hidden { backface-visibility: hidden; }
+    .rotate-y-180 { transform: rotateY(180deg); }
+
+    @keyframes glitch-shake {
+      0% { transform: translate(0, 0) rotate(0deg); }
+      20% { transform: translate(-10px, 8px) rotate(-1deg); }
+      40% { transform: translate(12px, -6px) rotate(1.5deg); }
+      60% { transform: translate(-8px, -4px) rotate(-1deg); }
+      80% { transform: translate(10px, 6px) rotate(1deg); }
+      100% { transform: translate(0, 0) rotate(0deg); }
+    }
+    .animate-glitch { animation: glitch-shake 0.25s infinite; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex items-center justify-center p-3 sm:p-6 overflow-x-hidden">
+
+  <div id="root" class="w-full max-w-xl"></div>
+
+  <!-- Регистрация Service Worker -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js')
+          .then(reg => console.log('SW зарегистрирован успешно:', reg.scope))
+          .catch(err => console.error('Ошибка регистрации SW:', err));
+      });
+    }
+  </script>
+
+  <!-- React Приложение -->
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const CARD_ICONS = ['🎮', '🚀', '🔮', '💎', '🎨', '⚡', '🤖', '👾', '🔥', '🌟', '🧩', '🎧'];
+
+    const DIFFICULTY = {
+      easy: { pairs: 4, grid: 'grid-cols-4', label: 'Легко' },
+      medium: { pairs: 6, grid: 'grid-cols-4', label: 'Средне' },
+      hard: { pairs: 8, grid: 'grid-cols-4', label: 'Сложно' },
+      expert: { pairs: 10, grid: 'grid-cols-5', label: 'Эксперт' }
+    };
+
+    // --- IndexedDB ---
+    const DB_NAME = 'MemoryCardsDB_V2';
+    const DB_VERSION = 1;
+
+    const openDB = () => {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        request.onupgradeneeded = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains('leaderboard')) {
+            const store = db.createObjectStore('leaderboard', { keyPath: 'id', autoIncrement: true });
+            store.createIndex('diff', 'diff', { unique: false });
+            store.createIndex('username', 'username', { unique: false });
+          }
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    };
+
+    const checkUserExists = async (targetUser) => {
+      try {
+        const db = await openDB();
+        return new Promise((resolve) => {
+          const tx = db.transaction('leaderboard', 'readonly');
+          const store = tx.objectStore('leaderboard');
+          const request = store.getAll();
+
+          request.onsuccess = () => {
+            const allRecords = request.result || [];
+            const exists = allRecords.some(r => r.username.toLowerCase() === targetUser.toLowerCase());
+            resolve(exists);
+          };
+          request.onerror = () => resolve(false);
+        });
+      } catch (e) {
+        return false;
+      }
+    };
+
+    const saveScoreToDB = async (record) => {
+      try {
+        const db = await openDB();
+        const tx = db.transaction('leaderboard', 'readwrite');
+        const store = tx.objectStore('leaderboard');
+        store.add(record);
+        return tx.complete;
+      } catch (err) {
+        console.error("IndexedDB Error:", err);
+      }
+    };
+
+    const getLeaderboardFromDB = async (diff) => {
+      try {
+        const db = await openDB();
+        return new Promise((resolve) => {
+          const tx = db.transaction('leaderboard', 'readonly');
+          const store = tx.objectStore('leaderboard');
+          const index = store.index('diff');
+          const request = index.getAll(diff);
+
+          request.onsuccess = () => {
+            const results = request.result || [];
+            const bestPerUser = {};
+            results.forEach(item => {
+              if (!bestPerUser[item.username] || 
+                  item.moves < bestPerUser[item.username].moves || 
+                  (item.moves === bestPerUser[item.username].moves && item.time < bestPerUser[item.username].time)) {
+                bestPerUser[item.username] = item;
+              }
+            });
+
+            const sorted = Object.values(bestPerUser).sort((a, b) => a.moves - b.moves || a.time - b.time);
+            resolve(sorted);
+          };
+          request.onerror = () => resolve([]);
+        });
+      } catch (err) {
+        return [];
+      }
+    };
+
+    function MemoryCardsGame() {
+      const [username, setUsername] = useState(localStorage.getItem('mc_username') || '');
+      const [isNameSubmitted, setIsNameSubmitted] = useState(!!localStorage.getItem('mc_username'));
+      const [nameInput, setNameInput] = useState('');
+
+      const [scaryError, setScaryError] = useState(null);
+      const [banLockout, setBanLockout] = useState(0);
+
+      const [diff, setDiff] = useState('expert');
+      const [cards, setCards] = useState([]);
+      const [flippedCards, setFlippedCards] = useState([]);
+      const [matchedPairs, setMatchedPairs] = useState([]);
+      const [moves, setMoves] = useState(0);
+      const [time, setTime] = useState(0);
+      const [isPlaying, setIsPlaying] = useState(false);
+      const [isWon, setIsWon] = useState(false);
+
+      const [leaderboard, setLeaderboard] = useState([]);
+      const [playerRank, setPlayerRank] = useState(null);
+      const [showLeaderboard, setShowLeaderboard] = useState(false);
+      const [deferredPrompt, setDeferredPrompt] = useState(null);
+
+      const timerRef = useRef(null);
+
+      useEffect(() => {
+        window.addEventListener('beforeinstallprompt', (e) => {
+          e.preventDefault();
+          setDeferredPrompt(e);
+        });
+      }, []);
+
+      const handleInstallApp = () => {
+        if (deferredPrompt) {
+          deferredPrompt.prompt();
+          deferredPrompt.userChoice.then(() => setDeferredPrompt(null));
+        }
+      };
+
+      useEffect(() => {
+        let lockoutTimer;
+        if (banLockout > 0) {
+          lockoutTimer = setTimeout(() => setBanLockout(b => b - 1), 1000);
+        } else if (banLockout === 0 && scaryError) {
+          setScaryError(null);
+        }
+        return () => clearTimeout(lockoutTimer);
+      }, [banLockout, scaryError]);
+
+      const refreshLeaderboard = async (level) => {
+        const data = await getLeaderboardFromDB(level);
+        setLeaderboard(data);
+        return data;
+      };
+
+      useEffect(() => {
+        refreshLeaderboard(diff);
+      }, [diff]);
+
+      useEffect(() => {
+        if (isPlaying && !isWon) {
+          timerRef.current = setInterval(() => setTime(t => t + 1), 1000);
+        } else {
+          clearInterval(timerRef.current);
+        }
+        return () => clearInterval(timerRef.current);
+      }, [isPlaying, isWon]);
+
+      const handleSaveName = async (e) => {
+        e.preventDefault();
+        const cleanName = nameInput.trim();
+        if (!cleanName) return;
+
+        const currentSaved = localStorage.getItem('mc_username');
+        if (currentSaved && currentSaved.toLowerCase() === cleanName.toLowerCase()) {
+          setUsername(currentSaved);
+          setIsNameSubmitted(true);
+          return;
+        }
+
+        const isTaken = await checkUserExists(cleanName);
+
+        if (isTaken) {
+          setScaryError({
+            user: cleanName,
+            ip: `192.168.${Math.floor(Math.random()*255)}.${Math.floor(Math.random()*255)}`,
+            code: `ERR_IDENTITY_THEFT_DETECTED_0x80070005`
+          });
+          setBanLockout(10);
+          return;
+        }
+
+        localStorage.setItem('mc_username', cleanName);
+        setUsername(cleanName);
+        setIsNameSubmitted(true);
+      };
+
+      const initGame = (newDiff = diff) => {
+        setDiff(newDiff);
+        const pairCount = DIFFICULTY[newDiff].pairs;
+        const selectedIcons = CARD_ICONS.slice(0, pairCount);
+        
+        const deck = [...selectedIcons, ...selectedIcons]
+          .sort(() => Math.random() - 0.5)
+          .map((icon, index) => ({ id: index, icon }));
+
+        setCards(deck);
+        setFlippedCards([]);
+        setMatchedPairs([]);
+        setMoves(0);
+        setTime(0);
+        setIsPlaying(true);
+        setIsWon(false);
+        setPlayerRank(null);
+        refreshLeaderboard(newDiff);
+      };
+
+      useEffect(() => {
+        if (isNameSubmitted) initGame('expert');
+      }, [isNameSubmitted]);
+
+      const handleCardClick = async (index) => {
+        if (!isPlaying || isWon || flippedCards.length === 2) return;
+        if (flippedCards.includes(index) || matchedPairs.includes(cards[index].icon)) return;
+
+        const newFlipped = [...flippedCards, index];
+        setFlippedCards(newFlipped);
+
+        if (newFlipped.length === 2) {
+          const nextMoves = moves + 1;
+          setMoves(nextMoves);
+          const [f, s] = newFlipped;
+
+          if (cards[f].icon === cards[s].icon) {
+            const newMatched = [...matchedPairs, cards[f].icon];
+            setMatchedPairs(newMatched);
+            setFlippedCards([]);
+
+            if (newMatched.length === DIFFICULTY[diff].pairs) {
+              const finalTime = time;
+              setIsWon(true);
+              setIsPlaying(false);
+
+              if (typeof confetti === 'function') {
+                confetti({ particleCount: 120, spread: 80, origin: { y: 0.6 } });
+              }
+
+              await saveScoreToDB({
+                username,
+                diff,
+                moves: nextMoves,
+                time: finalTime,
+                date: new Date().toLocaleDateString()
+              });
+
+              const updatedLB = await refreshLeaderboard(diff);
+              const rank = updatedLB.findIndex(p => p.username === username) + 1;
+              setPlayerRank(rank > 0 ? rank : 1);
+            }
+          } else {
+            setTimeout(() => setFlippedCards([]), 800);
+          }
+        }
+      };
+
+      const formatTime = (s) => `${Math.floor(s / 60)}:${s % 60 < 10 ? '0' : ''}${s % 60}`;
+
+      // --- ЭКРАН СТРАШНОЙ ОШИБКИ ---
+      if (scaryError) {
+        return (
+          <div className="fixed inset-0 bg-red-950 text-red-500 font-mono p-6 z-50 flex flex-col justify-between animate-glitch border-8 border-red-600">
+            <div>
+              <div className="flex items-center gap-3 border-b-2 border-red-600 pb-3 mb-6">
+                <span className="text-4xl">🚨</span>
+                <div>
+                  <h1 className="text-xl sm:text-2xl font-black text-red-500 tracking-widest uppercase">CRITICAL SYSTEM BREACH</h1>
+                  <p className="text-xs text-red-300">SECURITY PROTOCOL #9021 TRIGGERED</p>
+                </div>
+              </div>
+
+              <div className="space-y-4 text-sm sm:text-base leading-relaxed">
+                <p className="bg-red-900/60 p-3 border border-red-500 text-white font-bold">
+                  [!] WARNING: IDENTITY THEFT DETECTED
+                </p>
+
+                <p className="text-red-300">
+                  Попытка взлома! Никнейм <span className="text-yellow-300 font-bold">"{scaryError.user}"</span> принадлежит зарезервированному аккаунту!
+                </p>
+
+                <div className="bg-black/80 p-4 border border-red-700 text-xs text-red-400 space-y-1 rounded">
+                  <p>SYS_ERROR_CODE: {scaryError.code}</p>
+                  <p>TARGET_USER: {scaryError.user}</p>
+                  <p>CLIENT_IP: {scaryError.ip}</p>
+                  <p>STATUS: SYSTEM LOCKED</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-red-900/40 p-4 border border-red-600 text-center">
+              <p className="text-xs text-red-200 mb-1 uppercase tracking-wider font-bold">Блокировка ввода:</p>
+              <div className="text-3xl font-black text-white">{banLockout} СЕК</div>
+            </div>
+          </div>
+        );
+      }
+
+      // --- ВВОД НИКА ---
+      if (!isNameSubmitted) {
+        return (
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl text-center">
+            <div className="text-5xl mb-4">👑</div>
+            <h1 className="text-2xl font-black text-white mb-2">Memory Cards</h1>
+            <p className="text-slate-400 text-sm mb-6">Введите свой Nickname для таблицы лидеров:</p>
+            <form onSubmit={handleSaveName} className="space-y-4">
+              <input
+                type="text"
+                required
+                maxLength={15}
+                placeholder="Твой Unique Nickname..."
+                value={nameInput}
+                onChange={(e) => setNameInput(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-white text-center font-bold focus:outline-none focus:border-indigo-500 transition-all"
+              />
+              <button
+                type="submit"
+                className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3.5 rounded-xl shadow-lg transition-all"
+              >
+                Войти в игру 🚀
+              </button>
+            </form>
+          </div>
+        );
+      }
+
+      return (
+        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-4 sm:p-6 shadow-2xl">
+          
+          {/* Шапка */}
+          <div className="flex flex-col sm:flex-row justify-between items-center gap-3 mb-5">
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 to-cyan-400">
+                  🎴 Memory Cards
+                </h1>
+                <span className="text-xs bg-slate-800 text-slate-300 font-bold px-2 py-0.5 rounded-md border border-slate-700">
+                  👤 {username}
+                </span>
+              </div>
+              <p className="text-slate-400 text-xs mt-0.5">Найди все пары</p>
+            </div>
+
+            <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800">
+              {Object.keys(DIFFICULTY).map((key) => (
+                <button
+                  key={key}
+                  onClick={() => initGame(key)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                    diff === key ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {DIFFICULTY[key].label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Статистика */}
+          <div className="grid grid-cols-3 gap-2 bg-slate-950/60 p-3 rounded-2xl mb-5 border border-slate-800/80 text-center">
+            <div>
+              <div className="text-slate-400 text-[10px] uppercase font-extrabold tracking-wider">Ходы</div>
+              <div className="text-xl font-black text-indigo-400">{moves}</div>
+            </div>
+            <div>
+              <div className="text-slate-400 text-[10px] uppercase font-extrabold tracking-wider">Время</div>
+              <div className="text-xl font-black text-cyan-400">{formatTime(time)}</div>
+            </div>
+            <div>
+              <button 
+                onClick={() => setShowLeaderboard(!showLeaderboard)}
+                className="w-full h-full flex flex-col items-center justify-center hover:opacity-80 transition-opacity"
+              >
+                <div className="text-slate-400 text-[10px] uppercase font-extrabold tracking-wider">Таблица 🏆</div>
+                <div className="text-xs font-bold text-amber-400 underline">Посмотреть</div>
+              </button>
+            </div>
+          </div>
+
+          {/* Кнопка установки */}
+          {deferredPrompt && (
+            <button 
+              onClick={handleInstallApp}
+              className="w-full mb-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black text-xs py-2 rounded-xl shadow-lg transition-all"
+            >
+              📲 Установить как приложение
+            </button>
+          )}
+
+          {/* Таблица */}
+          {showLeaderboard ? (
+            <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4 mb-5 max-h-80 overflow-y-auto">
+              <div className="flex justify-between items-center mb-3 border-b border-slate-800 pb-2">
+                <h3 className="font-extrabold text-amber-400 text-sm">
+                  🏆 Рейтинг игроков ({DIFFICULTY[diff].label})
+                </h3>
+                <button onClick={() => setShowLeaderboard(false)} className="text-xs text-slate-400 hover:text-white">
+                  Закрыть ✖
+                </button>
+              </div>
+
+              {leaderboard.length === 0 ? (
+                <p className="text-slate-500 text-xs text-center py-4">На этом уровне пока нет рекордов.</p>
+              ) : (
+                <div className="space-y-2">
+                  {leaderboard.map((item, idx) => (
+                    <div 
+                      key={idx}
+                      className={`flex justify-between items-center text-xs p-2.5 rounded-xl border ${
+                        item.username === username 
+                          ? 'bg-indigo-950/70 border-indigo-500/80 text-indigo-100 font-bold' 
+                          : 'bg-slate-900 border-slate-800 text-slate-300'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="font-black text-slate-500 w-5">#{idx + 1}</span>
+                        <span>{item.username}</span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="text-indigo-400 font-bold">{item.moves} ходов</span>
+                        <span className="text-cyan-400 font-medium">{formatTime(item.time)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            /* Сетка */
+            <div className={`grid ${DIFFICULTY[diff].grid} gap-2.5 sm:gap-3.5 mb-5`}>
+              {cards.map((card, index) => {
+                const isFlipped = flippedCards.includes(index) || matchedPairs.includes(card.icon);
+                const isMatched = matchedPairs.includes(card.icon);
+
+                return (
+                  <div key={index} onClick={() => handleCardClick(index)} className="aspect-square perspective-1000 cursor-pointer">
+                    <div className={`w-full h-full relative duration-500 transform-style-3d transition-transform ${isFlipped ? 'rotate-y-180' : ''}`}>
+                      <div className="absolute inset-0 bg-gradient-to-br from-indigo-950 to-slate-950 border-2 border-indigo-500/30 rounded-2xl flex items-center justify-center text-indigo-400 font-bold text-lg shadow-lg hover:border-indigo-400/60 transition-colors backface-hidden">
+                        ✨
+                      </div>
+                      <div className={`absolute inset-0 rounded-2xl flex items-center justify-center text-3xl sm:text-4xl shadow-xl rotate-y-180 backface-hidden border-2 ${
+                        isMatched ? 'bg-emerald-950/80 border-emerald-500/80 text-emerald-300' : 'bg-slate-800 border-indigo-400 text-white'
+                      }`}>
+                        {card.icon}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Победа */}
+          {isWon && (
+            <div className="bg-emerald-950/60 border border-emerald-500/50 p-4 rounded-2xl text-center mb-4">
+              <h3 className="text-lg font-black text-emerald-400 mb-1">🎉 Уровень Завершён!</h3>
+              <p className="text-xs text-emerald-200 mb-2">
+                Результат: <strong>{moves}</strong> ходов | Время: <strong>{formatTime(time)}</strong>
+              </p>
+              
+              {playerRank && (
+                <div className="inline-block bg-amber-500/20 border border-amber-500/40 text-amber-300 font-extrabold text-xs px-3 py-1.5 rounded-xl mb-3">
+                  🥇 Твоё место в рейтинге «{DIFFICULTY[diff].label}»: #{playerRank}
+                </div>
+              )}
+
+              <br />
+
+              <button
+                onClick={() => initGame()}
+                className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black px-6 py-2.5 rounded-xl text-sm transition-all shadow-lg active:scale-95"
+              >
+                Сыграть ещё раз 🔄
+              </button>
+            </div>
+          )}
+
+          {!isWon && !showLeaderboard && (
+            <div className="flex justify-between items-center pt-2">
+              <button
+                onClick={() => { localStorage.removeItem('mc_username'); setIsNameSubmitted(false); }}
+                className="text-xs text-slate-500 hover:text-slate-300"
+              >
+                Сменить ник ({username})
+              </button>
+
+              <button
+                onClick={() => initGame()}
+                className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold px-4 py-2 rounded-xl text-xs transition-all border border-slate-700 active:scale-95"
+              >
+                Заново 🔄
+              </button>
+            </div>
+          )}
+
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<MemoryCardsGame />);
+  </script>
+</body>
+</html>
