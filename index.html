@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Memory Cards — Онлайн игра</title>
 
+  <!-- Favicon -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎴</text></svg>">
+
   <!-- PWA Meta tags & Manifest link -->
   <link rel="manifest" href="manifest.json">
   <meta name="theme-color" content="#090d16">
@@ -20,7 +23,15 @@
   <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
-  <script src="firebase-config.js"></script>
+  <script>
+    // Безопасное подключение внешнего конфига
+    window.addEventListener('error', function(e) {
+      if (e.target.src && e.target.src.includes('firebase-config.js')) {
+        console.warn('firebase-config.js не найден, используется локальный режим');
+      }
+    }, true);
+  </script>
+  <script src="firebase-config.js" onerror="this.onerror=null;"></script>
 
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800;900&display=swap');
@@ -51,7 +62,7 @@
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('./sw.js')
           .then(reg => console.log('SW зарегистрирован успешно:', reg.scope))
-          .catch(err => console.error('Ошибка регистрации SW:', err));
+          .catch(err => console.warn('Инфо: SW не зарегистрирован (работает автономный режим):', err.message));
       });
     }
   </script>
@@ -375,7 +386,7 @@
               />
               <button
                 type="submit"
-                className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3.5 rounded-xl shadow-lg transition-all"
+                className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3.5 rounded-xl shadow-lg transition-all active:scale-95"
               >
                 Войти в игру 🚀
               </button>
@@ -539,7 +550,7 @@
             <div className="flex justify-between items-center pt-2">
               <button
                 onClick={() => { localStorage.removeItem('mc_username'); setIsNameSubmitted(false); }}
-                className="text-xs text-slate-500 hover:text-slate-300"
+                className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
               >
                 Сменить ник ({username})
               </button>
