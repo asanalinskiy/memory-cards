@@ -6,7 +6,7 @@
   <title>Memory Cards — Онлайн игра</title>
 
   <!-- Favicon -->
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎴</text></svg>">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎴</text></svg>?v=2">
 
   <!-- PWA Meta tags & Manifest link -->
   <link rel="manifest" href="manifest.json">
@@ -23,15 +23,9 @@
   <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
-  <script>
-    // Безопасное подключение внешнего конфига
-    window.addEventListener('error', function(e) {
-      if (e.target.src && e.target.src.includes('firebase-config.js')) {
-        console.warn('firebase-config.js не найден, используется локальный режим');
-      }
-    }, true);
-  </script>
-  <script src="firebase-config.js" onerror="this.onerror=null;"></script>
+  
+  <!-- Твой файл конфигурации Firebase -->
+  <script src="firebase-config.js"></script>
 
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800;900&display=swap');
@@ -60,9 +54,7 @@
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./sw.js')
-          .then(reg => console.log('SW зарегистрирован успешно:', reg.scope))
-          .catch(err => console.warn('Инфо: SW не зарегистрирован (работает автономный режим):', err.message));
+        navigator.serviceWorker.register('./sw.js').catch(() => {});
       });
     }
   </script>
@@ -80,86 +72,53 @@
       expert: { pairs: 10, grid: 'grid-cols-5', label: 'Эксперт' }
     };
 
-    // --- IndexedDB ---
-    const DB_NAME = 'MemoryCardsDB_V2';
-    const DB_VERSION = 1;
+    // Проверка наличия Firebase
+    const isFirebaseReady = typeof firebase !== 'undefined' && firebase.apps.length > 0;
+    const dbRef = isFirebaseReady ? firebase.database().ref('leaderboard') : null;
 
-    const openDB = () => {
-      return new Promise((resolve, reject) => {
-        const request = indexedDB.open(DB_NAME, DB_VERSION);
-        request.onupgradeneeded = (e) => {
-          const db = e.target.result;
-          if (!db.objectStoreNames.contains('leaderboard')) {
-            const store = db.createObjectStore('leaderboard', { keyPath: 'id', autoIncrement: true });
-            store.createIndex('diff', 'diff', { unique: false });
-            store.createIndex('username', 'username', { unique: false });
-          }
-        };
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-    };
-
+    // --- Функции работы с базой данных (Firebase или Fallback в localStorage) ---
     const checkUserExists = async (targetUser) => {
+      if (!dbRef) return false;
       try {
-        const db = await openDB();
-        return new Promise((resolve) => {
-          const tx = db.transaction('leaderboard', 'readonly');
-          const store = tx.objectStore('leaderboard');
-          const request = store.getAll();
-
-          request.onsuccess = () => {
-            const allRecords = request.result || [];
-            const exists = allRecords.some(r => r.username.toLowerCase() === targetUser.toLowerCase());
-            resolve(exists);
-          };
-          request.onerror = () => resolve(false);
-        });
+        const snapshot = await dbRef.once('value');
+        const data = snapshot.val() || {};
+        return Object.values(data).some(r => r.username && r.username.toLowerCase() === targetUser.toLowerCase());
       } catch (e) {
         return false;
       }
     };
 
-    const saveScoreToDB = async (record) => {
-      try {
-        const db = await openDB();
-        const tx = db.transaction('leaderboard', 'readwrite');
-        const store = tx.objectStore('leaderboard');
-        store.add(record);
-        return tx.complete;
-      } catch (err) {
-        console.error("IndexedDB Error:", err);
+    const saveScoreToCloud = async (record) => {
+      if (dbRef) {
+        try {
+          await dbRef.push(record);
+        } catch (e) {
+          console.error("Ошибка сохранения в Firebase:", e);
+        }
       }
     };
 
-    const getLeaderboardFromDB = async (diff) => {
-      try {
-        const db = await openDB();
-        return new Promise((resolve) => {
-          const tx = db.transaction('leaderboard', 'readonly');
-          const store = tx.objectStore('leaderboard');
-          const index = store.index('diff');
-          const request = index.getAll(diff);
-
-          request.onsuccess = () => {
-            const results = request.result || [];
-            const bestPerUser = {};
-            results.forEach(item => {
-              if (!bestPerUser[item.username] || 
-                  item.moves < bestPerUser[item.username].moves || 
-                  (item.moves === bestPerUser[item.username].moves && item.time < bestPerUser[item.username].time)) {
-                bestPerUser[item.username] = item;
-              }
-            });
-
-            const sorted = Object.values(bestPerUser).sort((a, b) => a.moves - b.moves || a.time - b.time);
-            resolve(sorted);
-          };
-          request.onerror = () => resolve([]);
-        });
-      } catch (err) {
-        return [];
+    const fetchLeaderboard = async (diff, callback) => {
+      if (!dbRef) {
+        callback([]);
+        return;
       }
+      dbRef.orderByChild('diff').equalTo(diff).on('value', (snapshot) => {
+        const data = snapshot.val() || {};
+        const results = Object.values(data);
+        
+        const bestPerUser = {};
+        results.forEach(item => {
+          if (!bestPerUser[item.username] || 
+              item.moves < bestPerUser[item.username].moves || 
+              (item.moves === bestPerUser[item.username].moves && item.time < bestPerUser[item.username].time)) {
+            bestPerUser[item.username] = item;
+          }
+        });
+
+        const sorted = Object.values(bestPerUser).sort((a, b) => a.moves - b.moves || a.time - b.time);
+        callback(sorted);
+      });
     };
 
     function MemoryCardsGame() {
@@ -210,14 +169,11 @@
         return () => clearTimeout(lockoutTimer);
       }, [banLockout, scaryError]);
 
-      const refreshLeaderboard = async (level) => {
-        const data = await getLeaderboardFromDB(level);
-        setLeaderboard(data);
-        return data;
-      };
-
+      // Загрузка таблицы лидеров в реальном времени
       useEffect(() => {
-        refreshLeaderboard(diff);
+        fetchLeaderboard(diff, (data) => {
+          setLeaderboard(data);
+        });
       }, [diff]);
 
       useEffect(() => {
@@ -275,7 +231,6 @@
         setIsPlaying(true);
         setIsWon(false);
         setPlayerRank(null);
-        refreshLeaderboard(newDiff);
       };
 
       useEffect(() => {
@@ -308,7 +263,7 @@
                 confetti({ particleCount: 120, spread: 80, origin: { y: 0.6 } });
               }
 
-              await saveScoreToDB({
+              await saveScoreToCloud({
                 username,
                 diff,
                 moves: nextMoves,
@@ -316,9 +271,10 @@
                 date: new Date().toLocaleDateString()
               });
 
-              const updatedLB = await refreshLeaderboard(diff);
-              const rank = updatedLB.findIndex(p => p.username === username) + 1;
-              setPlayerRank(rank > 0 ? rank : 1);
+              setTimeout(() => {
+                const rank = leaderboard.findIndex(p => p.username === username) + 1;
+                setPlayerRank(rank > 0 ? rank : 1);
+              }, 500);
             }
           } else {
             setTimeout(() => setFlippedCards([]), 800);
@@ -328,7 +284,6 @@
 
       const formatTime = (s) => `${Math.floor(s / 60)}:${s % 60 < 10 ? '0' : ''}${s % 60}`;
 
-      // --- ЭКРАН СТРАШНОЙ ОШИБКИ ---
       if (scaryError) {
         return (
           <div className="fixed inset-0 bg-red-950 text-red-500 font-mono p-6 z-50 flex flex-col justify-between animate-glitch border-8 border-red-600">
@@ -345,15 +300,12 @@
                 <p className="bg-red-900/60 p-3 border border-red-500 text-white font-bold">
                   [!] WARNING: IDENTITY THEFT DETECTED
                 </p>
-
                 <p className="text-red-300">
-                  Попытка взлома! Никнейм <span className="text-yellow-300 font-bold">"{scaryError.user}"</span> принадлежит зарезервированному аккаунту!
+                  Попытка взлома! Никнейм <span className="text-yellow-300 font-bold">"{scaryError.user}"</span> уже занят другим игроком в сети!
                 </p>
-
                 <div className="bg-black/80 p-4 border border-red-700 text-xs text-red-400 space-y-1 rounded">
                   <p>SYS_ERROR_CODE: {scaryError.code}</p>
                   <p>TARGET_USER: {scaryError.user}</p>
-                  <p>CLIENT_IP: {scaryError.ip}</p>
                   <p>STATUS: SYSTEM LOCKED</p>
                 </div>
               </div>
@@ -367,13 +319,12 @@
         );
       }
 
-      // --- ВВОД НИКА ---
       if (!isNameSubmitted) {
         return (
           <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl text-center">
             <div className="text-5xl mb-4">👑</div>
             <h1 className="text-2xl font-black text-white mb-2">Memory Cards</h1>
-            <p className="text-slate-400 text-sm mb-6">Введите свой Nickname для таблицы лидеров:</p>
+            <p className="text-slate-400 text-sm mb-6">Введите уникальный Nickname для общего онлайна:</p>
             <form onSubmit={handleSaveName} className="space-y-4">
               <input
                 type="text"
@@ -398,7 +349,6 @@
       return (
         <div className="bg-slate-900 border border-slate-800 rounded-3xl p-4 sm:p-6 shadow-2xl">
           
-          {/* Шапка */}
           <div className="flex flex-col sm:flex-row justify-between items-center gap-3 mb-5">
             <div>
               <div className="flex items-center gap-2">
@@ -409,7 +359,7 @@
                   👤 {username}
                 </span>
               </div>
-              <p className="text-slate-400 text-xs mt-0.5">Найди все пары</p>
+              <p className="text-slate-400 text-xs mt-0.5">Онлайн таблица лидеров</p>
             </div>
 
             <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800">
@@ -427,7 +377,6 @@
             </div>
           </div>
 
-          {/* Статистика */}
           <div className="grid grid-cols-3 gap-2 bg-slate-950/60 p-3 rounded-2xl mb-5 border border-slate-800/80 text-center">
             <div>
               <div className="text-slate-400 text-[10px] uppercase font-extrabold tracking-wider">Ходы</div>
@@ -442,13 +391,12 @@
                 onClick={() => setShowLeaderboard(!showLeaderboard)}
                 className="w-full h-full flex flex-col items-center justify-center hover:opacity-80 transition-opacity"
               >
-                <div className="text-slate-400 text-[10px] uppercase font-extrabold tracking-wider">Таблица 🏆</div>
+                <div className="text-slate-400 text-[10px] uppercase font-extrabold tracking-wider">Рейтинг 🏆</div>
                 <div className="text-xs font-bold text-amber-400 underline">Посмотреть</div>
               </button>
             </div>
           </div>
 
-          {/* Кнопка установки */}
           {deferredPrompt && (
             <button 
               onClick={handleInstallApp}
@@ -458,12 +406,11 @@
             </button>
           )}
 
-          {/* Таблица */}
           {showLeaderboard ? (
             <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4 mb-5 max-h-80 overflow-y-auto">
               <div className="flex justify-between items-center mb-3 border-b border-slate-800 pb-2">
                 <h3 className="font-extrabold text-amber-400 text-sm">
-                  🏆 Рейтинг игроков ({DIFFICULTY[diff].label})
+                  🌐 Мировой ТОП ({DIFFICULTY[diff].label})
                 </h3>
                 <button onClick={() => setShowLeaderboard(false)} className="text-xs text-slate-400 hover:text-white">
                   Закрыть ✖
@@ -471,7 +418,7 @@
               </div>
 
               {leaderboard.length === 0 ? (
-                <p className="text-slate-500 text-xs text-center py-4">На этом уровне пока нет рекордов.</p>
+                <p className="text-slate-500 text-xs text-center py-4">В сети пока нет рекордов. Будь первым!</p>
               ) : (
                 <div className="space-y-2">
                   {leaderboard.map((item, idx) => (
@@ -497,7 +444,6 @@
               )}
             </div>
           ) : (
-            /* Сетка */
             <div className={`grid ${DIFFICULTY[diff].grid} gap-2.5 sm:gap-3.5 mb-5`}>
               {cards.map((card, index) => {
                 const isFlipped = flippedCards.includes(index) || matchedPairs.includes(card.icon);
@@ -521,7 +467,6 @@
             </div>
           )}
 
-          {/* Победа */}
           {isWon && (
             <div className="bg-emerald-950/60 border border-emerald-500/50 p-4 rounded-2xl text-center mb-4">
               <h3 className="text-lg font-black text-emerald-400 mb-1">🎉 Уровень Завершён!</h3>
@@ -531,7 +476,7 @@
               
               {playerRank && (
                 <div className="inline-block bg-amber-500/20 border border-amber-500/40 text-amber-300 font-extrabold text-xs px-3 py-1.5 rounded-xl mb-3">
-                  🥇 Твоё место в рейтинге «{DIFFICULTY[diff].label}»: #{playerRank}
+                  🥇 Ваше место в мировом ТОПе: #{playerRank}
                 </div>
               )}
 
